@@ -10,7 +10,7 @@ Local dev environment running KCP (kcp.io) on a Kind cluster with Prometheus, Gr
 
 ```bash
 make setup              # Create Kind cluster + deploy full stack (idempotent, ~5min)
-make teardown           # Delete Kind cluster + remove generated kubeconfig
+make teardown           # Delete Kind cluster + remove generated kubeconfigs
 make demo               # Create sample KCP resources (workspaces, APIExports, widgets)
 make status             # Show pod status + Prometheus scrape targets
 make build-exporter     # Rebuild Go exporter image, load to Kind, restart deployment
@@ -21,9 +21,15 @@ make logs-exporter      # Tail kcp-exporter logs
 To work with KCP after setup:
 ```bash
 export KUBECONFIG=./kcp-admin.kubeconfig
-kubectl get workspaces
-kubectl ws tree
+KCP=https://kcp.localhost:8443
+
+# All KCP requests MUST include /clusters/<workspace-path> in the server URL
+kubectl --server=$KCP/clusters/root get workspaces
+kubectl --server=$KCP/clusters/root:org-alpha get apiexports
+kubectl --server=$KCP/clusters/root:org-beta get widgets
 ```
+
+**Important**: bare `kubectl get workspaces` will fail with "Forbidden" — KCP requires workspace-scoped requests via the `/clusters/<path>` URL prefix.
 
 ### Go Exporter Development
 
@@ -51,6 +57,14 @@ OTel Collector ──(prometheusremotewrite)──> Prometheus
 
 The OTel Collector sits as a central OTLP pipeline forwarding to Prometheus via remote write. Currently only metrics flow through it; traces/logs pipelines exist but export to debug only.
 
+## KCP API Specifics
+
+- All API requests must be scoped to a workspace: `/clusters/root/apis/...`, `/clusters/root:child/apis/...`
+- The exporter queries `/clusters/root/apis/tenancy.kcp.io/v1alpha1/workspaces`, etc.
+- KCP serves both `v1alpha1` and `v1alpha2` for APIExport/APIBinding — the exporter uses `v1alpha1`
+- The `system:kcp:admin` group grants broad access; `system:kcp:external-logical-cluster-admin` (chart default) does NOT have list permissions
+- Front-proxy cert SAN is `kcp.localhost` only — in-cluster clients must use `insecure-skip-tls-verify` or the hostname
+
 ## Helm Chart Value Structure (gotchas)
 
 The KCP chart (kcp/kcp v0.14.0) has specific value paths that differ from what you might guess:
@@ -59,8 +73,9 @@ The KCP chart (kcp/kcp v0.14.0) has specific value paths that differ from what y
 - etcd is `etcd.enabled: true` at root level, not `kcp.etcd.embedded`
 - etcd volume size is `etcd.volumeSize`, not `etcd.persistence.size`
 - Front-proxy NodePort is `kcpFrontProxy.service.nodePort`
+- etcd defaults to **3 replicas** (chart default) even for local dev
 
-The OTel Collector chart (v0.145.0) merges in default receivers (jaeger, zipkin, prometheus). Null them out explicitly in values to avoid port conflicts. The image tag must not be pinned to old versions — the chart's telemetry config format (`readers` block) requires a matching collector binary version.
+The OTel Collector chart (v0.145.0) merges in default receivers (jaeger, zipkin, prometheus). Null them out explicitly in values to avoid port conflicts. Do NOT pin the image tag to old versions — the chart's telemetry config format (`readers` block) requires a matching collector binary version.
 
 ## Kind NodePort Mappings
 
@@ -72,7 +87,11 @@ The OTel Collector chart (v0.145.0) merges in default receivers (jaeger, zipkin,
 
 ## KCP Authentication
 
-cert-manager issues a client certificate with org `system:kcp:admin`. The `kcp/generate-kubeconfig.sh` script extracts certs from the K8s secret `kcp-admin-client-cert` and builds a kubeconfig pointing to `https://kcp.localhost:8443`. The exporter mounts this kubeconfig from secret `kcp-exporter-kubeconfig`.
+Setup generates two self-contained kubeconfigs with **embedded cert data** (no file-path references):
+- **`kcp-admin.kubeconfig`** — for local use, server `https://kcp.localhost:8443`, cert issued by `kcp-front-proxy-client-issuer` with `O=system:kcp:admin`
+- **`kcp-exporter.kubeconfig`** — for in-cluster use, server `https://kcp-front-proxy.kcp.svc.cluster.local:8443` with `insecure-skip-tls-verify: true` (cert SAN only covers `kcp.localhost`)
+
+The chart-generated kubeconfig (`kcp-external-admin-kubeconfig` secret) uses file-path references that only work inside KCP pods — do NOT use it for external clients.
 
 ## Namespaces
 
@@ -87,12 +106,12 @@ cert-manager issues a client certificate with org `system:kcp:admin`. The `kcp/g
 3. kube-prometheus-stack (Helm, prometheus-community repo) — installed **before** KCP so ServiceMonitor CRD exists
 4. OTel Collector (Helm, open-telemetry repo)
 5. KCP (Helm, kcp repo)
-6. Admin kubeconfig generation via `kcp/generate-kubeconfig.sh`
-7. Docker build kcp-exporter → `kind load docker-image` → deploy manifests
+6. Build self-contained admin kubeconfigs from cert-manager secrets (`kcp-admin-client-cert` + `kcp-ca`)
+7. Docker build kcp-exporter -> `kind load docker-image` -> deploy manifests
 8. Grafana dashboards as ConfigMaps with `grafana_dashboard=1` label
 
 All steps are idempotent (skip-if-exists or helm upgrade).
 
 ## Resource Budget
 
-Docker Desktop needs 12GB+ RAM. etcd alone takes ~1-2GB. Total stack: ~8-10GB with system overhead.
+Docker Desktop needs 12GB+ RAM. etcd runs 3 replicas at ~1Gi each. Total stack: ~10-12GB with system overhead.
