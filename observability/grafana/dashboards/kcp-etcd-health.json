@@ -1,0 +1,188 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "etcd Leader Changes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(etcd_server_leader_changes_seen_total{job=~\".*etcd.*\"}[5m])",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "title": "etcd Proposal Failures",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(etcd_server_proposals_failed_total{job=~\".*etcd.*\"}[5m])",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "title": "etcd WAL Fsync Duration (p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(etcd_disk_wal_fsync_duration_seconds_bucket{job=~\".*etcd.*\"}[5m])) by (le, pod))",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "etcd Backend Commit Duration (p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(etcd_disk_backend_commit_duration_seconds_bucket{job=~\".*etcd.*\"}[5m])) by (le, pod))",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "etcd DB Size",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "etcd_mvcc_db_total_size_in_bytes{job=~\".*etcd.*\"}",
+          "legendFormat": "{{ pod }} total"
+        },
+        {
+          "expr": "etcd_mvcc_db_total_size_in_use_in_bytes{job=~\".*etcd.*\"}",
+          "legendFormat": "{{ pod }} in-use"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "title": "etcd gRPC Request Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_started_total{job=~\".*etcd.*\"}[5m])) by (grpc_method)",
+          "legendFormat": "{{ grpc_method }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "title": "etcd Active Watchers",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "etcd_debugging_mvcc_watcher_total{job=~\".*etcd.*\"}",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "title": "etcd Keys Total",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "etcd_debugging_mvcc_keys_total{job=~\".*etcd.*\"}",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "title": "etcd Proposals Pending",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "etcd_server_proposals_pending{job=~\".*etcd.*\"}",
+          "legendFormat": "{{ pod }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["kcp", "etcd"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "KCP etcd Health",
+  "uid": "kcp-etcd-health",
+  "version": 1
+}

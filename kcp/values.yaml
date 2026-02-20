@@ -1,0 +1,41 @@
+# KCP Helm chart values for local Kind deployment
+# Ref: https://github.com/kcp-dev/helm-charts (chart v0.14.0)
+
+# Top-level: required by the chart template
+externalHostname: kcp.localhost
+externalPort: "8443"
+
+kcp:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  extraFlags: []
+  monitoring:
+    serviceMonitor:
+      enabled: true
+
+kcpFrontProxy:
+  replicas: 1
+  service:
+    type: NodePort
+    nodePort: 30443
+  monitoring:
+    serviceMonitor:
+      enabled: true
+
+etcd:
+  enabled: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+  volumeSize: 8Gi
+  monitoring:
+    serviceMonitor:
+      enabled: true

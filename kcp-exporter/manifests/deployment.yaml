@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kcp-exporter
+  namespace: kcp
+  labels:
+    app: kcp-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kcp-exporter
+  template:
+    metadata:
+      labels:
+        app: kcp-exporter
+    spec:
+      serviceAccountName: default
+      containers:
+        - name: kcp-exporter
+          image: kcp-exporter:latest
+          imagePullPolicy: Never
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: KUBECONFIG
+              value: /etc/kcp/kubeconfig
+          volumeMounts:
+            - name: kcp-admin-kubeconfig
+              mountPath: /etc/kcp
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: kcp-admin-kubeconfig
+          secret:
+            secretName: kcp-exporter-kubeconfig

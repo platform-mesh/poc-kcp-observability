@@ -1,0 +1,236 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Total Workspaces",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(kcp_workspaces_total)",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Total APIExports",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_apiexports_total",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Total APIBindings",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(kcp_apibindings_total)",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Total APIResourceSchemas",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_apiresourceschemas_total",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Workspaces by Phase",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_workspaces_total",
+          "legendFormat": "{{ phase }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "title": "APIBindings by Phase",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_apibindings_total",
+          "legendFormat": "{{ phase }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      }
+    },
+    {
+      "title": "Workspaces Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_workspaces_total",
+          "legendFormat": "{{ phase }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Logical Clusters Total",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_logical_clusters_total",
+          "legendFormat": "Logical Clusters"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Resource Summary",
+      "type": "table",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "kcp_workspaces_total",
+          "legendFormat": "Workspaces ({{ phase }})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "kcp_apiexports_total",
+          "legendFormat": "APIExports",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "kcp_apibindings_total",
+          "legendFormat": "APIBindings ({{ phase }})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "kcp_apiresourceschemas_total",
+          "legendFormat": "APIResourceSchemas",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["kcp", "resources"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "KCP Resources",
+  "uid": "kcp-resources",
+  "version": 1
+}

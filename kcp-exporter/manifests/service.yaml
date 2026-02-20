@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kcp-exporter
+  namespace: kcp
+  labels:
+    app: kcp-exporter
+spec:
+  selector:
+    app: kcp-exporter
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP

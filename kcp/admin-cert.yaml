@@ -1,0 +1,24 @@
+# cert-manager Certificate for KCP admin client authentication
+# The "system:kcp:admin" organization grants cluster-admin access in KCP
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kcp-admin-client-cert
+  namespace: kcp
+spec:
+  secretName: kcp-admin-client-cert
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - client auth
+  commonName: kcp-admin
+  subject:
+    organizations:
+      - "system:kcp:admin"
+  issuerRef:
+    name: kcp-front-proxy-client-issuer
+    kind: Issuer
+    group: cert-manager.io

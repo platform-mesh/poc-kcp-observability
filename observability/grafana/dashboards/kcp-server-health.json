@@ -1,0 +1,166 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "API Request Rate by Verb",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(apiserver_request_total{job=~\".*kcp.*\"}[5m])) by (verb)",
+          "legendFormat": "{{ verb }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "title": "API Request Rate by Resource",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "topk(10, sum(rate(apiserver_request_total{job=~\".*kcp.*\"}[5m])) by (resource))",
+          "legendFormat": "{{ resource }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "title": "API Request Latency (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(apiserver_request_duration_seconds_bucket{job=~\".*kcp.*\"}[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(apiserver_request_duration_seconds_bucket{job=~\".*kcp.*\"}[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{job=~\".*kcp.*\"}[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "API Error Rate (5xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(apiserver_request_total{job=~\".*kcp.*\", code=~\"5..\"}[5m])) by (code)",
+          "legendFormat": "{{ code }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "reqps",
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "title": "Inflight Requests",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(apiserver_current_inflight_requests{job=~\".*kcp.*\"}) by (request_kind)",
+          "legendFormat": "{{ request_kind }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "API Request Rate by Response Code",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(apiserver_request_total{job=~\".*kcp.*\"}[5m])) by (code)",
+          "legendFormat": "{{ code }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "title": "Request Latency by Verb (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(apiserver_request_duration_seconds_bucket{job=~\".*kcp.*\"}[5m])) by (le, verb))",
+          "legendFormat": "{{ verb }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "s"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["kcp", "apiserver"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "KCP Server Health",
+  "uid": "kcp-server-health",
+  "version": 1
+}

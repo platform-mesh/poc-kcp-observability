@@ -1,0 +1,64 @@
+# kube-prometheus-stack Helm values for KCP observability
+# Ref: https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+
+prometheus:
+  prometheusSpec:
+    # Allow OTel Collector to push via remote write
+    enableRemoteWriteReceiver: true
+    # Discover ServiceMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # Retention for local dev
+    retention: 7d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+  service:
+    type: NodePort
+    nodePort: 30090
+
+grafana:
+  enabled: true
+  adminPassword: admin
+  service:
+    type: NodePort
+    nodePort: 30080
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+# Disable components not needed for local dev
+alertmanager:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: true
+
+# Disable default monitors for Kind system components (they use different ports)
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
