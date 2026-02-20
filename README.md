@@ -102,9 +102,27 @@ kubectl --server=$KCP/clusters/root:org-beta get widgets
 
 ## Grafana Dashboards
 
-- **KCP Server Health**: API request rate by verb/resource/code, latency p50/p95/p99, error rates, inflight requests
-- **KCP etcd Health**: Leader changes, WAL fsync duration, DB size, gRPC rates, active watchers
-- **KCP Resources**: Workspace count by phase, APIExport/APIBinding/Schema totals, time series, summary table
+All three KCP dashboards are auto-provisioned alongside the standard Kubernetes dashboards:
+
+![Grafana dashboard list showing KCP dashboards](docs/screenshots/grafana-dashboards.png)
+
+### KCP Resources
+
+The primary dashboard for KCP-specific observability. Shows workspace counts by phase, APIExport/APIBinding/Schema totals, time series trends, and a resource summary table. All data comes from the custom KCP exporter.
+
+![KCP Resources dashboard showing 4 workspaces, 4 APIExports, 3 APIBindings, 10 schemas](docs/screenshots/kcp-resources.png)
+
+### KCP Server Health
+
+Standard API server metrics adapted for KCP: request rates by verb and resource, latency percentiles (p50/p95/p99), 5xx error rates, inflight requests, and response code distribution.
+
+![KCP Server Health dashboard showing API request rates, latencies, and error rates](docs/screenshots/kcp-server-health.png)
+
+### KCP etcd Health
+
+etcd cluster health for KCP's backing store: leader changes, proposal failures, WAL fsync duration, backend commit latency, DB size, gRPC request rates, active watchers, key counts, and pending proposals.
+
+![KCP etcd Health dashboard showing WAL fsync, DB size, gRPC rates across 3 replicas](docs/screenshots/kcp-etcd-health.png)
 
 ## Components
 
