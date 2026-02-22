@@ -115,3 +115,25 @@ All steps are idempotent (skip-if-exists or helm upgrade).
 ## Resource Budget
 
 Docker Desktop needs 12GB+ RAM. etcd runs 3 replicas at ~1Gi each. Total stack: ~10-12GB with system overhead.
+
+## KCP RBAC & Bind Permissions (lessons learned)
+
+- APIExports must be in `root` workspace for bind permissions to work (Deep SAR evaluates bootstrap RBAC only in root)
+- Child workspaces need explicit `cluster-admin` ClusterRoleBinding for `system:kcp:admin` — the Helm chart may not enable the admin battery
+- `resourceNames: ["*"]` does NOT work as a wildcard for bind RBAC
+- The `apis.kcp.io:binding:` prefix is mandatory for maximal permission policy subjects
+- demo.sh creates explicit RBAC in each child workspace before creating APIBindings
+
+## Exporter Notes
+
+- Exporter silently skips child workspace subtrees on 403 (logs warning with response body, increments scrape_errors counter)
+- `kcp_shard_condition` requires synthetic Ready condition for KCP v0.30.0 (no real conditions populated)
+- Collection intervals: root metrics=30s, workspace tree=5min, per-workspace=60s
+- Error responses now include response body for actionable debug info
+
+## Dashboard Notes
+
+- Use `or vector(0)` pattern for stat panels that may have no data initially
+- Use `clamp_min(denominator, 1)` to prevent division-by-zero in ratio panels
+- Shard Status panel falls back to `kcp_shard_info{ready="true"}` when `kcp_shard_condition` is empty
+- Table panels use `noValue` in fieldConfig to show helpful messages when empty

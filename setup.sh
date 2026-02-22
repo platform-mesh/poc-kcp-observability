@@ -65,6 +65,10 @@ else
     --wait --timeout 5m
 fi
 
+# Apply KCP PrometheusRule alert rules
+info "Applying KCP alert rules..."
+kubectl apply -f "${SCRIPT_DIR}/observability/prometheus/kcp-alerts.yaml"
+
 # -------------------------------------------------------------------
 # Step 4: OTel Collector
 # -------------------------------------------------------------------
@@ -91,6 +95,20 @@ info "Step 5/8: Installing KCP..."
 helm repo add kcp https://kcp-dev.github.io/helm-charts 2>/dev/null || true
 helm repo update kcp
 kubectl create namespace "${KCP_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+# Create audit policy ConfigMap (chart's audit.enabled=false, so we manage it manually)
+info "Creating KCP audit policy ConfigMap..."
+kubectl create configmap kcp-audit-policy \
+  --from-file=audit-policy.yaml="${SCRIPT_DIR}/kcp/audit-policy.yaml" \
+  -n "${KCP_NAMESPACE}" \
+  --dry-run=client -o yaml | \
+  kubectl label --local -f - \
+    app.kubernetes.io/managed-by=Helm -o yaml | \
+  kubectl annotate --local -f - \
+    meta.helm.sh/release-name=kcp \
+    meta.helm.sh/release-namespace="${KCP_NAMESPACE}" -o yaml | \
+  kubectl apply -f -
+
 if helm status kcp -n "${KCP_NAMESPACE}" >/dev/null 2>&1; then
   info "KCP already installed, upgrading..."
   helm upgrade kcp kcp/kcp \
@@ -109,15 +127,57 @@ info "Waiting for KCP pods..."
 kubectl wait --for=condition=Ready pods -l app.kubernetes.io/instance=kcp \
   -n "${KCP_NAMESPACE}" --timeout=300s || true
 
+# Add hostAlias so KCP pod can resolve kcp.localhost to the front-proxy service.
+# Without this, the workspace controller tries to dial kcp.localhost:8443 from inside
+# the pod, which resolves to localhost where there's no front-proxy listening.
+info "Patching KCP deployment with front-proxy hostAlias..."
+FRONT_PROXY_IP="$(kubectl get svc kcp-front-proxy -n "${KCP_NAMESPACE}" -o jsonpath='{.spec.clusterIP}')"
+kubectl patch deployment kcp -n "${KCP_NAMESPACE}" --type=strategic \
+  -p "{\"spec\":{\"template\":{\"spec\":{\"hostAliases\":[{\"ip\":\"${FRONT_PROXY_IP}\",\"hostnames\":[\"kcp.localhost\"]}]}}}}"
+kubectl rollout status deployment/kcp -n "${KCP_NAMESPACE}" --timeout=120s
+
 # -------------------------------------------------------------------
 # Step 6: Build self-contained KCP admin kubeconfig
 # -------------------------------------------------------------------
 info "Step 6/8: Building KCP admin kubeconfig..."
 
-# The chart-generated kubeconfig uses file-path references (only works inside KCP pods).
-# We build a self-contained kubeconfig with embedded cert data for external use.
-CLIENT_CERT=$(kubectl get secret kcp-external-admin-kubeconfig-cert -n "${KCP_NAMESPACE}" -o jsonpath='{.data.tls\.crt}')
-CLIENT_KEY=$(kubectl get secret kcp-external-admin-kubeconfig-cert -n "${KCP_NAMESPACE}" -o jsonpath='{.data.tls\.key}')
+# The chart-generated cert uses O=system:kcp:external-logical-cluster-admin which lacks
+# list permissions for most KCP resources. Create a proper admin cert with O=system:kcp:admin.
+kubectl apply -f - <<'CERT_EOF'
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kcp-admin-client-cert
+  namespace: kcp
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: kcp
+    meta.helm.sh/release-namespace: kcp
+spec:
+  secretName: kcp-admin-client-cert
+  issuerRef:
+    name: kcp-front-proxy-client-issuer
+  commonName: kcp-admin
+  duration: 8760h
+  renewBefore: 360h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - client auth
+  subject:
+    organizations:
+      - "system:kcp:admin"
+CERT_EOF
+
+# Wait for the certificate to be issued
+info "Waiting for admin client certificate..."
+kubectl wait --for=condition=Ready certificate/kcp-admin-client-cert \
+  -n "${KCP_NAMESPACE}" --timeout=60s
+
+CLIENT_CERT=$(kubectl get secret kcp-admin-client-cert -n "${KCP_NAMESPACE}" -o jsonpath='{.data.tls\.crt}')
+CLIENT_KEY=$(kubectl get secret kcp-admin-client-cert -n "${KCP_NAMESPACE}" -o jsonpath='{.data.tls\.key}')
 CA_CERT=$(kubectl get secret kcp-ca -n "${KCP_NAMESPACE}" -o jsonpath='{.data.ca\.crt}')
 
 cat > "${SCRIPT_DIR}/kcp-admin.kubeconfig" <<EOF
@@ -168,6 +228,13 @@ users:
 EOF
 
 info "KCP admin kubeconfig written to ${SCRIPT_DIR}/kcp-admin.kubeconfig"
+
+# Disable the 'universal' workspace type initializer — no initializer controller exists
+# in this local dev setup, so workspaces would stay stuck in Initializing forever.
+info "Disabling universal workspace type initializer..."
+KUBECONFIG="${SCRIPT_DIR}/kcp-admin.kubeconfig" kubectl \
+  --server="https://kcp.localhost:8443/clusters/root" \
+  patch workspacetype universal --type=merge -p '{"spec":{"initializer":false}}' || true
 
 # -------------------------------------------------------------------
 # Step 7: Build and deploy KCP exporter

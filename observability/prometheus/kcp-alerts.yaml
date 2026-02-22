@@ -1,0 +1,252 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kcp-alerts
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ---------------------------------------------------------------
+    # Group 1: kcp-workspace-lifecycle (3 rules)
+    # ---------------------------------------------------------------
+    - name: kcp-workspace-lifecycle
+      rules:
+        - alert: KCPWorkspaceSchedulingStuck
+          expr: kcp_workspace_stuck_count{phase="Scheduling"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP workspaces stuck in Scheduling phase"
+            description: >-
+              {{ $value }} workspace(s) have been in Scheduling phase for longer
+              than the 5-minute threshold. Runbook: 1) Check kcp-server logs for
+              scheduling errors. 2) Verify shard availability with
+              kcp_shard_condition. 3) Check if workspace types are correctly
+              configured. 4) Review cluster resource availability.
+
+        - alert: KCPWorkspaceInitializingStuck
+          expr: kcp_workspace_stuck_count{phase="Initializing"} > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP workspaces stuck in Initializing phase"
+            description: >-
+              {{ $value }} workspace(s) have been in Initializing phase for longer
+              than the 10-minute threshold. Runbook: 1) Check initializer
+              controller logs. 2) Verify workspace type initializer configuration.
+              3) Check for failing admission webhooks. 4) Review RBAC permissions
+              for the initializer service account.
+
+        - alert: KCPWorkspaceTerminatingStuck
+          expr: kcp_workspace_stuck_count{phase="Terminating"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP workspaces stuck in Terminating phase"
+            description: >-
+              {{ $value }} workspace(s) have been in Terminating phase for longer
+              than the 15-minute threshold. Runbook: 1) Check for finalizers
+              blocking deletion. 2) Review workspace controller logs for errors.
+              3) Check if dependent resources (APIBindings, secrets) are blocking
+              cleanup. 4) Consider manually removing stuck finalizers as last
+              resort.
+
+    # ---------------------------------------------------------------
+    # Group 2: kcp-api-health (2 rules)
+    # ---------------------------------------------------------------
+    - name: kcp-api-health
+      rules:
+        - alert: KCPAPIServerErrorRate
+          expr: >-
+            sum(rate(apiserver_request_total{job=~".*kcp.*", code=~"5.."}[5m]))
+            /
+            sum(rate(apiserver_request_total{job=~".*kcp.*"}[5m]))
+            > 0.01
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "KCP API server 5xx error rate exceeds 1%"
+            description: >-
+              The KCP API server is returning 5xx errors at a rate above 1% of
+              total requests. Current error ratio: {{ $value | humanizePercentage }}.
+              Runbook: 1) Check kcp-server pod logs for error details.
+              2) Review etcd health and connectivity. 3) Check for resource
+              exhaustion (CPU, memory). 4) Verify admission webhooks are healthy.
+              5) Check network connectivity to etcd.
+
+        - alert: KCPAPIBindingsUnbound
+          expr: count(kcp_apibinding_info{phase!="Bound"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP APIBindings not in Bound phase"
+            description: >-
+              {{ $value }} APIBinding(s) are not in Bound phase for more than
+              10 minutes. Runbook: 1) Check APIBinding status conditions for
+              error details. 2) Verify the referenced APIExport exists and is
+              accessible. 3) Check RBAC permissions for the consuming workspace.
+              4) Verify the provider workspace is Ready and the export has a
+              valid identity.
+
+    # ---------------------------------------------------------------
+    # Group 3: kcp-controller-health (3 rules)
+    # ---------------------------------------------------------------
+    - name: kcp-controller-health
+      rules:
+        - alert: KCPControllerQueueBacklog
+          expr: workqueue_depth{job=~".*kcp.*"} > 100
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP controller queue depth exceeds 100"
+            description: >-
+              Controller {{ $labels.name }} has a queue depth of {{ $value }}
+              for more than 10 minutes. Runbook: 1) Check controller logs for
+              processing errors. 2) Review CPU/memory usage of kcp-server pods.
+              3) Check etcd latency and performance. 4) Consider scaling KCP
+              server replicas if load is sustained. 5) Look for hot-loop
+              reconciliation patterns.
+
+        - alert: KCPControllerHighRetryRate
+          expr: sum(rate(workqueue_retries_total{job=~".*kcp.*"}[5m])) by (name) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP controller retry rate exceeds 10/s"
+            description: >-
+              Controller {{ $labels.name }} is retrying at {{ $value | humanize }}
+              retries/s for more than 5 minutes. Runbook: 1) Check controller
+              logs for recurring errors causing retries. 2) Look for conflict
+              errors indicating concurrent modifications. 3) Check if external
+              dependencies (webhooks, etcd) are intermittently failing.
+              4) Review resource version conflicts.
+
+        - alert: KCPControllerStuck
+          expr: workqueue_unfinished_work_seconds{job=~".*kcp.*"} > 300
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "KCP controller has unfinished work for over 5 minutes"
+            description: >-
+              Controller {{ $labels.name }} has had unfinished work for
+              {{ $value | humanizeDuration }}. Runbook: 1) Check for deadlocked
+              goroutines in kcp-server. 2) Review controller logs for hung
+              operations. 3) Check etcd connectivity and responsiveness.
+              4) Consider restarting the kcp-server pod if the controller
+              cannot recover. 5) Check for external webhook timeouts.
+
+    # ---------------------------------------------------------------
+    # Group 4: kcp-etcd-health (4 rules)
+    # ---------------------------------------------------------------
+    - name: kcp-etcd-health
+      rules:
+        - alert: KCPEtcdDatabaseSizeLarge
+          expr: etcd_mvcc_db_total_size_in_bytes{job=~".*etcd.*"} > 6e+09
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "KCP etcd database size exceeds 6GB"
+            description: >-
+              etcd instance {{ $labels.instance }} database size is
+              {{ $value | humanize1024 }}B. The default etcd quota is 8GB.
+              Runbook: 1) Run etcd defragmentation. 2) Check for excessive
+              watch event history. 3) Review workspace count and resource
+              density. 4) Consider compacting old revisions. 5) Plan for etcd
+              quota increase if growth is expected.
+
+        - alert: KCPEtcdLeaderChangesFrequent
+          expr: rate(etcd_server_leader_changes_seen_total{job=~".*etcd.*"}[15m]) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP etcd frequent leader changes"
+            description: >-
+              etcd cluster is experiencing frequent leader changes at
+              {{ $value | humanize }}/s over 15 minutes. Runbook: 1) Check
+              network latency between etcd members. 2) Review disk I/O
+              performance (fsync latency). 3) Verify etcd members have
+              sufficient CPU and memory. 4) Check for clock skew between nodes.
+              5) Review etcd member logs for election timeout details.
+
+        - alert: KCPEtcdHighFsyncLatency
+          expr: >-
+            histogram_quantile(0.99,
+              rate(etcd_disk_wal_fsync_duration_seconds_bucket{job=~".*etcd.*"}[5m])
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP etcd WAL fsync p99 latency exceeds 500ms"
+            description: >-
+              etcd instance {{ $labels.instance }} WAL fsync p99 latency is
+              {{ $value | humanizeDuration }}. Runbook: 1) Check disk I/O
+              performance with iostat. 2) Verify etcd is using fast storage
+              (SSD recommended). 3) Check for I/O contention from other
+              processes. 4) Review etcd data directory disk utilization.
+              5) Consider moving etcd data to faster storage.
+
+        - alert: KCPEtcdHighBackendCommitLatency
+          expr: >-
+            histogram_quantile(0.99,
+              rate(etcd_disk_backend_commit_duration_seconds_bucket{job=~".*etcd.*"}[5m])
+            ) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP etcd backend commit p99 latency exceeds 1s"
+            description: >-
+              etcd instance {{ $labels.instance }} backend commit p99 latency is
+              {{ $value | humanizeDuration }}. Runbook: 1) Check disk I/O
+              performance. 2) Review etcd database size and fragmentation.
+              3) Consider running defragmentation. 4) Verify sufficient memory
+              for backend buffer cache. 5) Check for competing I/O workloads
+              on the same storage.
+
+    # ---------------------------------------------------------------
+    # Group 5: kcp-exporter-health (2 rules)
+    # ---------------------------------------------------------------
+    - name: kcp-exporter-health
+      rules:
+        - alert: KCPExporterScrapeErrors
+          expr: rate(kcp_exporter_scrape_errors_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KCP exporter experiencing scrape errors"
+            description: >-
+              The kcp-exporter is encountering scrape errors at
+              {{ $value | humanize }}/s. Runbook: 1) Check kcp-exporter pod
+              logs for error details. 2) Verify KCP API server connectivity
+              from the exporter pod. 3) Check the exporter kubeconfig secret
+              is valid and not expired. 4) Review kcp-front-proxy logs for
+              authentication failures. 5) Verify network policies allow
+              exporter-to-KCP traffic.
+
+        - alert: KCPExporterDown
+          expr: up{job=~".*kcp-exporter.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "KCP exporter is down"
+            description: >-
+              The kcp-exporter target is unreachable by Prometheus for more
+              than 2 minutes. Runbook: 1) Check kcp-exporter pod status with
+              kubectl get pods -n kcp. 2) Review pod logs for crash loops.
+              3) Verify the ServiceMonitor matches the exporter service.
+              4) Check node resource pressure. 5) Restart the deployment
+              with kubectl rollout restart deployment/kcp-exporter -n kcp.

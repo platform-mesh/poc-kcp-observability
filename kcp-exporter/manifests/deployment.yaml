@@ -27,6 +27,12 @@ spec:
           env:
             - name: KUBECONFIG
               value: /etc/kcp/kubeconfig
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317
+            - name: OTEL_SERVICE_NAME
+              value: kcp-exporter
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.namespace=kcp,deployment.environment=local
           volumeMounts:
             - name: kcp-admin-kubeconfig
               mountPath: /etc/kcp

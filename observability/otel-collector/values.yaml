@@ -41,6 +41,17 @@ ports:
   zipkin:
     enabled: false
 
+extraVolumes:
+  - name: kcp-audit-logs
+    hostPath:
+      path: /var/log/kcp
+      type: DirectoryOrCreate
+
+extraVolumeMounts:
+  - name: kcp-audit-logs
+    mountPath: /var/log/kcp
+    readOnly: true
+
 config:
   receivers:
     otlp:
@@ -49,15 +60,70 @@ config:
           endpoint: 0.0.0.0:4317
         http:
           endpoint: 0.0.0.0:4318
+    filelog:
+      include:
+        - /var/log/kcp/audit.log
+      start_at: beginning
+      operators:
+        - type: json_parser
+          on_error: drop
+          timestamp:
+            parse_from: body.requestReceivedTimestamp
+            layout_type: gotime
+            layout: '2006-01-02T15:04:05.000000Z'
+        - type: move
+          from: body.verb
+          to: attributes.audit_verb
+          if: '"verb" in body'
+        - type: move
+          from: body.user.username
+          to: attributes.audit_user
+          if: '"user" in body and "username" in body["user"]'
+        - type: move
+          from: body.objectRef.resource
+          to: attributes.audit_resource
+          if: '"objectRef" in body and "resource" in body["objectRef"]'
+        - type: move
+          from: body.objectRef.apiGroup
+          to: attributes.audit_api_group
+          if: '"objectRef" in body and "apiGroup" in body["objectRef"]'
+        - type: move
+          from: body.responseStatus.code
+          to: attributes.response_code
+          if: '"responseStatus" in body and "code" in body["responseStatus"]'
+        - type: move
+          from: body["annotations"]["kcp.io/path"]
+          to: attributes.workspace_path
+          if: '"annotations" in body and "kcp.io/path" in body["annotations"]'
+        - type: move
+          from: body["annotations"]["tenancy.kcp.io/workspace"]
+          to: attributes.logical_cluster
+          if: '"annotations" in body and "tenancy.kcp.io/workspace" in body["annotations"]'
+        - type: severity_parser
+          parse_from: attributes.response_code
+          if: '"response_code" in attributes'
+          mapping:
+            error:
+              - min: 500
+                max: 599
+            warn:
+              - min: 400
+                max: 499
+            info:
+              - min: 200
+                max: 399
     # Explicitly null out default receivers the chart merges in
     jaeger: null
     zipkin: null
     prometheus: null
 
   processors:
-    batch:
+    batch/metrics:
       timeout: 10s
       send_batch_size: 1024
+    batch/logs:
+      timeout: 5s
+      send_batch_size: 256
     memory_limiter:
       check_interval: 5s
       limit_mib: 200
@@ -77,15 +143,15 @@ config:
     pipelines:
       metrics:
         receivers: [otlp]
-        processors: [memory_limiter, batch]
+        processors: [memory_limiter, batch/metrics]
         exporters: [prometheusremotewrite, debug]
       traces:
         receivers: [otlp]
-        processors: [memory_limiter, batch]
+        processors: [memory_limiter, batch/metrics]
         exporters: [debug]
       logs:
-        receivers: [otlp]
-        processors: [memory_limiter, batch]
+        receivers: [otlp, filelog]
+        processors: [memory_limiter, batch/logs]
         exporters: [debug]
     telemetry:
       metrics:

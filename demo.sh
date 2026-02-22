@@ -18,6 +18,17 @@ kws() {
   kubectl --server="${KCP_BASE}/clusters/${ws_path}" "$@"
 }
 
+# Poll until condition is met or timeout
+wait_for() {
+  local desc="$1" timeout="$2" interval="$3"; shift 3
+  local deadline=$((SECONDS + timeout))
+  while [ $SECONDS -lt $deadline ]; do
+    if "$@" 2>/dev/null; then return 0; fi
+    sleep "$interval"
+  done
+  error "Timed out waiting for: ${desc} (${timeout}s)"
+}
+
 if [ ! -f "${KUBECONFIG}" ]; then
   error "KCP admin kubeconfig not found at ${KUBECONFIG}. Run setup.sh first."
 fi
@@ -43,7 +54,7 @@ metadata:
   name: ${ws}
 spec:
   type:
-    name: universal
+    name: organization
     path: root
 EOF
   fi
@@ -66,11 +77,15 @@ for ws in org-alpha org-beta org-gamma; do
 done
 
 # -------------------------------------------------------------------
-# Create APIResourceSchema + APIExport in org-alpha
+# Create APIResourceSchema + APIExport in root workspace
 # -------------------------------------------------------------------
-info "Creating APIResourceSchema and APIExport in org-alpha..."
+# NOTE: The APIExport is created in the root workspace because KCP's
+# Deep SubjectAccessReview for bind permissions only evaluates RBAC
+# correctly in the root workspace (bootstrap policy). This matches
+# how KCP's built-in exports (tenancy.kcp.io, topology.kcp.io) work.
+info "Creating APIResourceSchema and APIExport in root workspace..."
 
-kws root:org-alpha apply -f - <<'EOF'
+kws root apply -f - <<'EOF'
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
@@ -108,7 +123,7 @@ spec:
         status: {}
 EOF
 
-kws root:org-alpha apply -f - <<'EOF'
+kws root apply -f - <<'EOF'
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIExport
 metadata:
@@ -116,17 +131,101 @@ metadata:
 spec:
   latestResourceSchemas:
     - v1.widgets.example.com
+  maximalPermissionPolicy:
+    local: {}
 EOF
 
-info "Waiting for APIExport to be ready..."
-sleep 5
+# Grant bind permission on the widgets APIExport to all authenticated users.
+kws root apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: widgets-bind
+rules:
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexports"]
+    resourceNames: ["widgets"]
+    verbs: ["bind"]
+EOF
+kws root apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: widgets-bind
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: widgets-bind
+subjects:
+  - kind: Group
+    name: "system:authenticated"
+    apiGroup: rbac.authorization.k8s.io
+EOF
+
+# Grant maximal permission policy RBAC — required when maximalPermissionPolicy.local is set.
+kws root apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: widgets-maximal-permission-policy
+rules:
+  - apiGroups: ["example.com"]
+    resources: ["widgets"]
+    verbs: ["*"]
+  - apiGroups: ["example.com"]
+    resources: ["widgets/status"]
+    verbs: ["get", "list", "watch"]
+EOF
+kws root apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: widgets-maximal-permission-policy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: widgets-maximal-permission-policy
+subjects:
+  - kind: Group
+    name: "apis.kcp.io:binding:system:authenticated"
+    apiGroup: rbac.authorization.k8s.io
+EOF
+
+info "Waiting for APIExport to be discoverable..."
+wait_for "APIExport 'widgets' exists in root" 30 3 \
+  kws root get apiexport widgets -o name
+
+# -------------------------------------------------------------------
+# Grant admin access in child workspaces
+# -------------------------------------------------------------------
+# KCP's admin battery may be disabled in the Helm chart, so system:kcp:admin
+# may not have automatic access in child workspaces. Grant it explicitly so
+# both demo.sh and the kcp-exporter (same cert) can query child workspace APIs.
+info "Granting admin access in child workspaces..."
+for ws in org-alpha org-beta org-gamma; do
+  kws "root:${ws}" apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kcp-admin-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: Group
+    name: system:kcp:admin
+    apiGroup: rbac.authorization.k8s.io
+EOF
+done
 
 # -------------------------------------------------------------------
 # Create APIBindings in consumer workspaces
 # -------------------------------------------------------------------
-for ws in org-beta org-gamma; do
+for ws in org-alpha org-beta org-gamma; do
   info "Creating APIBinding in ${ws}..."
-  kws "root:${ws}" apply -f - <<EOF
+  for attempt in $(seq 1 4); do
+    if kws "root:${ws}" apply -f - <<EOF 2>/dev/null
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIBinding
 metadata:
@@ -134,16 +233,28 @@ metadata:
 spec:
   reference:
     export:
-      path: root:org-alpha
+      path: root
       name: widgets
 EOF
+    then
+      info "APIBinding created in ${ws}."
+      break
+    fi
+    if [ "${attempt}" -eq 4 ]; then
+      info "Warning: APIBinding in ${ws} failed after ${attempt} attempts."
+    else
+      info "Retrying APIBinding in ${ws} (attempt ${attempt}/4)..."
+      sleep 10
+    fi
+  done
 done
 
-# Wait for bindings to be ready
+# Wait for bindings to be ready (polling instead of fixed sleep)
 info "Waiting for APIBindings to become Bound..."
-sleep 10
-
-for ws in org-beta org-gamma; do
+for ws in org-alpha org-beta org-gamma; do
+  info "Waiting for APIBinding in ${ws} to become Bound..."
+  wait_for "APIBinding widgets in ${ws} Bound" 60 5 \
+    bash -c "phase=\$(kubectl --server=${KCP_BASE}/clusters/root:${ws} get apibinding widgets -o jsonpath='{.status.phase}' 2>/dev/null) && [ \"\$phase\" = 'Bound' ]"
   phase=$(kws "root:${ws}" get apibinding widgets -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
   info "APIBinding 'widgets' in ${ws}: ${phase}"
 done
@@ -154,7 +265,7 @@ done
 COLORS=("red" "blue" "green" "yellow" "purple")
 SIZES=("small" "medium" "large")
 
-for ws in org-beta org-gamma; do
+for ws in org-alpha org-beta org-gamma; do
   info "Creating sample Widgets in ${ws}..."
 
   # Ensure default namespace exists
@@ -178,6 +289,33 @@ EOF
 done
 
 # -------------------------------------------------------------------
+# Verification
+# -------------------------------------------------------------------
+info "Running verification checks..."
+PASS=true
+
+# Check workspaces
+ws_count=$(kws root get workspaces -o json | python3 -c "import sys,json; print(len(json.load(sys.stdin)['items']))")
+[ "$ws_count" -ge 3 ] && info "PASS: ${ws_count} workspaces found" || { info "FAIL: only ${ws_count} workspaces"; PASS=false; }
+
+# Check APIExport
+kws root get apiexport widgets -o name >/dev/null 2>&1 && info "PASS: APIExport exists" || { info "FAIL: APIExport missing"; PASS=false; }
+
+# Check APIBindings are Bound
+for ws in org-alpha org-beta org-gamma; do
+  phase=$(kws "root:${ws}" get apibinding widgets -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+  [ "$phase" = "Bound" ] && info "PASS: ${ws} binding is Bound" || { info "FAIL: ${ws} binding is ${phase}"; PASS=false; }
+done
+
+# Check Widgets exist
+for ws in org-alpha org-beta org-gamma; do
+  wc=$(kws "root:${ws}" get widgets -o json 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('items',[])))" 2>/dev/null || echo "0")
+  [ "$wc" -ge 1 ] && info "PASS: ${ws} has ${wc} widgets" || { info "FAIL: ${ws} has no widgets"; PASS=false; }
+done
+
+$PASS && info "All verification checks passed!" || error "Some verification checks failed — see above"
+
+# -------------------------------------------------------------------
 # Summary
 # -------------------------------------------------------------------
 echo ""
@@ -186,13 +324,14 @@ echo "  Demo resources created!"
 echo "=============================================="
 echo ""
 echo "  Workspaces:  org-alpha, org-beta, org-gamma"
-echo "  APIExport:   widgets (in org-alpha)"
-echo "  APIBindings: widgets (in org-beta, org-gamma)"
-echo "  Widgets:     3 per consumer workspace"
+echo "  APIExport:   widgets (in root)"
+echo "  APIBindings: widgets (in org-alpha, org-beta, org-gamma)"
+echo "  Widgets:     3 per workspace"
 echo ""
 echo "  Explore:"
 echo "    kubectl --server=${KCP_BASE}/clusters/root get workspaces"
-echo "    kubectl --server=${KCP_BASE}/clusters/root:org-alpha get apiexports"
+echo "    kubectl --server=${KCP_BASE}/clusters/root get apiexports"
+echo "    kubectl --server=${KCP_BASE}/clusters/root:org-alpha get widgets"
 echo "    kubectl --server=${KCP_BASE}/clusters/root:org-beta get widgets"
 echo ""
 echo "  Check Grafana 'KCP Resources' dashboard:"

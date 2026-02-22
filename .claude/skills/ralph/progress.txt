@@ -1,0 +1,321 @@
+## Codebase Patterns
+- Grafana dashboards go in `observability/grafana/dashboards/*.json` — setup.sh auto-creates ConfigMaps with `grafana_dashboard=1` label from all JSON files in that directory
+- Dashboard JSON follows schemaVersion 39, uses `{ "type": "prometheus", "uid": "prometheus" }` as datasource
+- Existing dashboards: kcp-resources.json (uid: kcp-resources), kcp-server-health.json (uid: kcp-server-health), kcp-etcd-health.json (uid: kcp-etcd-health)
+- Row panels use `"type": "row"` with `"collapsed": false`
+- No separate ConfigMap creation needed in setup.sh for new dashboards — the loop handles it
+- When adding panels to existing dashboards, start new panel IDs from 100+ to avoid conflicts
+- KCP API groups filter: `tenancy.kcp.io|apis.kcp.io|core.kcp.io|topology.kcp.io|cache.kcp.io`
+- Stacked area panels: `"stacking": { "mode": "normal" }` inside `custom`
+- WATCH connections metric: `apiserver_longrunning_requests`; watch events metric: `apiserver_watch_events_total`
+- Go exporter pattern: define struct → register gauge(s) in var block → MustRegister in init() → implement collectX() → call from collectMetrics()
+- Reusable `condition` struct: `{Type, Status, LastTransitionTime, Reason, Message}` — used by shards, workspaces, etc.
+- GaugeVec.Reset() before setting new values handles resource deletion (no stale label combos)
+- KCP shards API: `/clusters/root/apis/core.kcp.io/v1alpha1/shards`
+- KCP workspace types API: `/clusters/root/apis/tenancy.kcp.io/v1alpha1/workspacetypes`
+- Boolean spec fields → format as `"true"`/`"false"` strings for Prometheus label values
+- KCP endpoint slices API: `/clusters/root/apis/apis.kcp.io/v1alpha1/apiexportendpointslices`
+- Lifecycle metrics reuse existing workspace API response — no extra HTTP call; parse items as `workspaceLifecycleItem` for both phase counts and duration
+- `calculatePhaseDuration()`: Ready phase uses Ready condition's lastTransitionTime; non-Ready uses creationTimestamp as fallback; clamp negatives with `math.Max(0, ...)`
+- Stuck thresholds: Scheduling=5min, Initializing=10min, Terminating=15min — compare duration seconds vs threshold.Seconds()
+- Recursive workspace discovery: `discoverWorkspaces(ctx, client, cfg, parentPath)` returns `[]*WorkspaceNode` tree; child path = `parentPath + ":" + childName`; only recurses into Ready workspaces
+- `WorkspaceNode` is exported; `workspaceFullItem` is for discovery parsing (name, type, phase only)
+- Per-workspace collection uses semaphore(10) + sync.WaitGroup for bounded concurrency; `collectForWorkspace()` queries 3 resource types per workspace
+- Two separate ticker loops in main(): 30s for root-level `collectMetrics()`, 60s for per-workspace `collectWorkspaceMetrics()` + `collectTopology()`
+- Discovery goroutine (5-min ticker) writes tree under Lock; collection goroutine reads under RLock — `sync.RWMutex` protects `workspaceTree`
+- `collectWorkspaceMetrics` resets all per-workspace GaugeVecs before each cycle, then walks the tree setting info for all workspaces and collecting resources only for Ready ones
+- Topology collection (`collectTopology`) walks the tree sequentially (not concurrent) because it accumulates consumer counts in a shared `map[exportKey]int`
+- `apiBindingFullItem` has `spec.reference.export.path` (provider workspace) and `spec.reference.export.name` — separate from `apiBindingItem` which only has phase
+- `exportKey{Workspace, Name}` struct as map key for aggregating consumer counts across workspaces
+- Empty `identityHash` defaults to `"unknown"` for Prometheus label safety
+- OTel async gauges: `Int64ObservableGauge` with `WithInt64Callback` reading from `exporterState` under RLock; periodic reader invokes callbacks at export time
+- OTel import alias: `otelmetric "go.opentelemetry.io/otel/metric"` avoids conflict with `"go.opentelemetry.io/otel/sdk/metric"` (imported as `metric`)
+- Dual-write pattern: `collectMetrics` writes Prometheus gauges + stores int64 counts in `exporterState` under Lock; OTel async gauges read state at export time
+- OTel instruments gated by nil check: `otelInst *otelInstruments` is nil when OTEL_EXPORTER_OTLP_ENDPOINT not set; callers check `if otelInst != nil`
+- Table panels: use `labelsToFields` + `organize` transforms to create clean columns from Prometheus metric labels
+- Value mappings: `fieldConfig.defaults.mappings` maps numeric values to descriptive strings (e.g., 1 -> "Healthy")
+- Gauge panels: set `min`/`max` in fieldConfig.defaults for scale range
+- Unique count pattern in PromQL: `count(count by (label1, label2) (metric))`
+- PrometheusRule CRDs need label `release: kube-prometheus-stack` for operator discovery
+- AlertManager config in Helm values: `alertmanager.config.route/receivers` (not under alertmanagerSpec)
+- Place `kubectl apply` for PrometheusRules in setup.sh after the Prometheus Helm install/upgrade block
+- KCP Helm chart: `kcp.extraFlags` (list of `--flag` strings), `kcp.volumeMounts`, `kcp.volumes` for pod-level config
+- Audit policy ConfigMap must exist before KCP Helm install — create it in setup.sh between namespace creation and helm install/upgrade
+- KCP audit log path: `/var/log/kcp/audit.log` — shared via hostPath volume with OTel Collector filelog receiver
+- OTel filelog json_parser: parsed fields go under `body.*`; use `body.field` in move operators, bracket notation for special-char keys (`body["annotations"]["kcp.io/path"]`)
+- OTel Helm chart: `extraVolumes`/`extraVolumeMounts` are top-level values (not nested under `config:`)
+
+## 2026-02-21 - US-001
+- Implemented KCP Controller Health Grafana dashboard
+- Files changed: observability/grafana/dashboards/kcp-controller-health.json (new)
+- 7 data panels across 4 rows: Queue Health Overview, Error Indicators, Detailed Timing, Longest Running
+- Panels: Queue Depth (stacked area with thresholds), Processing Rate, Retry Rate (with thresholds), Queue Wait Latency p99, Work Duration p99 (with thresholds), Unfinished Work Duration (with thresholds), Longest Running Processor
+- **Learnings for future iterations:**
+  - setup.sh Step 8 iterates all `observability/grafana/dashboards/*.json` files — no need to add individual ConfigMap creation commands
+  - Panel IDs must be unique within a dashboard; row panels also need IDs
+  - legendFormat uses `{{name}}` (double curly braces) for workqueue metrics since the `name` label identifies the controller
+  - Thresholds are set in `fieldConfig.defaults.thresholds` with `steps` array (color + value)
+---
+
+## 2026-02-21 - US-002
+- Added 2 new rows with 8 panels to kcp-server-health.json (KCP API Groups + KCP Operation Latency)
+- Files changed: observability/grafana/dashboards/kcp-server-health.json (modified)
+- KCP API Groups row: Request Rate by Group (stacked area), Request Rate by Resource Top 10, Watch Event Rate, Error Rate by Group (with thresholds)
+- KCP Operation Latency row: Workspace CRUD Latency p50/p95/p99, APIBinding Creation Latency p50/p95/p99, LIST Request Latency by Resource p99, WATCH Connection Count by Resource
+- All 7 original panels preserved unchanged; new panel IDs start from 100
+- **Learnings for future iterations:**
+  - When adding panels to existing dashboards, start IDs from 100+ to avoid conflicts with auto-assigned IDs
+  - KCP API groups to filter on: `tenancy.kcp.io|apis.kcp.io|core.kcp.io|topology.kcp.io|cache.kcp.io`
+  - Stacked area uses `"custom": { "drawStyle": "line", "fillOpacity": 30, "stacking": { "mode": "normal" } }`
+  - WATCH connections use `apiserver_longrunning_requests` metric, not `apiserver_watch_events_total`
+  - Watch events use `apiserver_watch_events_total`; unit `"ops"` for event rates
+---
+
+## 2026-02-21 - US-003
+- Added shard metrics collection to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Added `condition` struct (reusable for shards, workspaces, etc.) with Type, Status, LastTransitionTime, Reason, Message
+- Added `shardItem` struct parsing metadata.name, spec.baseURL, status.conditions
+- Registered 3 new metrics: kcp_shards_total (gauge), kcp_shard_info (gauge vec: name, url, ready), kcp_shard_condition (gauge vec: name, type, status)
+- Implemented `collectShards()` querying `/clusters/root/apis/core.kcp.io/v1alpha1/shards`
+- Resets shard_info and shard_condition before each cycle to handle shard removal
+- Called from collectMetrics() after LogicalClusters collection
+- **Learnings for future iterations:**
+  - The pattern for adding new resource metrics is: struct → var gauge → init() register → collectX() function → call from collectMetrics()
+  - `condition` struct is now defined and reusable — no need to redefine for US-006 or US-009
+  - GaugeVec.Reset() is essential before setting values to clear stale label combinations from deleted resources
+  - KCP workspace types API: `/clusters/root/apis/tenancy.kcp.io/v1alpha1/workspacetypes` (needed for US-004)
+---
+
+## 2026-02-21 - US-004
+- Added workspace type metrics collection to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Added `workspaceTypeItem` struct parsing metadata.name, spec.defaultChildWorkspaceType, spec.initializer, spec.terminator
+- Registered 2 new metrics: kcp_workspace_types_total (gauge), kcp_workspace_type_info (gauge vec: name, has_initializer, has_terminator)
+- Implemented `collectWorkspaceTypes()` querying `/clusters/root/apis/tenancy.kcp.io/v1alpha1/workspacetypes`
+- Resets workspaceTypeInfo before each cycle; formats booleans as "true"/"false" strings for label values
+- Called from collectMetrics() after collectShards()
+- **Learnings for future iterations:**
+  - Boolean fields in KCP spec are native Go bools — format as "true"/"false" strings for Prometheus label values
+  - WorkspaceType spec has `initializer` and `terminator` as bool fields, not conditions
+  - KCP endpoint slices API: `/clusters/root/apis/apis.kcp.io/v1alpha1/apiexportendpointslices` (needed for US-005)
+---
+
+## 2026-02-21 - US-005
+- Added APIExportEndpointSlice metrics collection to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Added `endpointSliceItem` struct parsing metadata.name, spec.export.name, spec.export.path, status.endpoints[].url
+- Registered 2 new metrics: kcp_apiexport_endpoint_slices_total (gauge), kcp_apiexport_endpoints_total (gauge vec: export, workspace)
+- Implemented `collectEndpointSlices()` querying `/clusters/root/apis/apis.kcp.io/v1alpha1/apiexportendpointslices`
+- Resets apiExportEndpointsTotal before each cycle; sets endpoint count per slice (0 means virtual workspace is down)
+- Called from collectMetrics() after collectWorkspaceTypes()
+- **Learnings for future iterations:**
+  - Endpoint slices use `spec.export.path` as the workspace label — this is the workspace path where the export lives
+  - `status.endpoints` is a slice of structs with URL — len() gives endpoint count, 0 means VWS is down
+  - The "export" label maps to spec.export.name, "workspace" label maps to spec.export.path
+---
+
+## 2026-02-21 - US-006
+- Added workspace lifecycle duration and stuck detection metrics to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Added `workspaceLifecycleItem` struct with metadata.name, metadata.creationTimestamp, status.phase, status.conditions
+- Registered 2 new metrics: kcp_workspace_phase_duration_seconds (gauge vec: path, phase), kcp_workspace_stuck_count (gauge vec: phase)
+- Implemented `calculatePhaseDuration()` using Ready condition lastTransitionTime for Ready phase, creationTimestamp fallback for non-Ready, with `math.Max(0, ...)` for clock skew
+- Defined `stuckThresholds` map: Scheduling=5min, Initializing=10min, Terminating=15min
+- Integrated into existing workspace collection — reuses the same API response, no additional HTTP request
+- Replaced unused `workspaceItem` struct with `workspaceLifecycleItem` (superset)
+- Both gauges reset before each collection cycle to handle workspace deletion
+- **Learnings for future iterations:**
+  - `workspaceLifecycleItem` is a superset of the old `workspaceItem` — using it for both phase counts and lifecycle avoids double-parsing
+  - `math.Max(0, ...)` is essential for clamping negative durations from clock skew between exporter and KCP server
+  - Stuck counts are accumulated per-phase in a map, then set on the GaugeVec after the loop — this ensures only phases with stuck workspaces get a metric value
+  - The "path" label uses workspace metadata.name (root-level workspaces); future recursive collection (US-007/US-008) will use full workspace paths
+---
+
+## 2026-02-21 - US-007
+- Added recursive workspace discovery types and function to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Added `WorkspaceNode` struct with Name, Path, Type, Phase string fields and Children []*WorkspaceNode
+- Added `workspaceFullItem` struct parsing metadata.name, spec.type.name, status.phase
+- Implemented `discoverWorkspaces(ctx, client, cfg, parentPath)` returning ([]*WorkspaceNode, error)
+- Queries `/clusters/{parentPath}/apis/tenancy.kcp.io/v1alpha1/workspaces` and builds child path as `parentPath + ":" + ws.Metadata.Name`
+- Only recurses into workspaces with status.phase == "Ready"
+- If recursion into a child fails, logs warning and skips that subtree (does not fail the whole tree)
+- **Learnings for future iterations:**
+  - `WorkspaceNode` is exported (uppercase) since it's the tree structure consumed by US-008 and US-009
+  - `workspaceFullItem` is separate from `workspaceLifecycleItem` — discovery only needs name, type, phase; lifecycle needs creationTimestamp and conditions
+  - Child workspace path format: `parentPath + ":" + childName` (e.g., `root:org-alpha:team1`)
+  - Only recurse into Ready workspaces — non-Ready workspaces may not serve API requests
+  - Graceful degradation: skip failing subtrees with a log warning, don't abort entire tree discovery
+---
+
+## 2026-02-21 - US-008
+- Added per-workspace collection with concurrency and main integration to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Registered 6 new metrics: kcp_workspace_info (gauge vec: path, name, type, phase), kcp_workspace_apiexports_total (gauge vec: workspace_path), kcp_workspace_apibindings_total (gauge vec: workspace_path, phase), kcp_workspace_apiresourceschemas_total (gauge vec: workspace_path), kcp_workspace_tree_depth (gauge), kcp_workspace_children_total (gauge vec: path)
+- Implemented `collectForWorkspace()` querying apiexports, apibindings, apiresourceschemas for a single workspace
+- Implemented `calculateTreeDepth()` returning max depth of workspace tree
+- Implemented `collectWorkspaceMetrics()` walking tree, setting info/tree metrics, and concurrently collecting per-workspace resources with semaphore(10) and sync.WaitGroup
+- Added discovery goroutine to main() with 5-minute ticker and immediate startup run, protected by sync.RWMutex
+- Added collection goroutine with 60-second ticker reading workspace tree under RLock
+- All per-workspace GaugeVecs reset before each collection cycle to clear stale entries
+- **Learnings for future iterations:**
+  - Tree depth calculation: `calculateTreeDepth` returns depth of children; add 1 for root level to get actual tree depth
+  - Discovery goroutine runs independently from root-level collectMetrics — two separate ticker loops (30s for root, 60s for per-workspace)
+  - Semaphore pattern: `sem <- struct{}{}` to acquire, `defer func() { <-sem }()` to release — limits concurrent API queries to 10
+  - `workspaceInfoGauge` sets info for ALL discovered workspaces (including non-Ready); `collectForWorkspace` only runs for Ready ones
+  - Per-workspace binding metrics use the existing `apiBindingItem` struct for phase parsing — no new struct needed
+  - US-009 (topology) will call `collectTopology()` from the same 60-second collection loop after `collectWorkspaceMetrics()`
+---
+
+## 2026-02-21 - US-009
+- Added APIBinding topology metrics and collection to Go exporter
+- Files changed: kcp-exporter/main.go (modified)
+- Added `apiBindingFullItem` struct parsing metadata.name, spec.reference.export.path/name, status.phase/boundResources/conditions
+- Added `apiExportFullItem` struct parsing metadata.name, spec.latestResourceSchemas, status.identityHash/conditions
+- Added `exportKey` struct with Workspace and Name string fields for consumer count aggregation
+- Registered 3 new metrics: kcp_apibinding_info (gauge vec: consumer_workspace, provider_workspace, export_name, phase), kcp_apiexport_consumers_total (gauge vec: provider_workspace, export_name), kcp_apiexport_info (gauge vec: workspace, name, identity_hash, schema_count)
+- Implemented `collectBindingsForWorkspace()` querying `/clusters/{path}/apis/apis.kcp.io/v1alpha1/apibindings` and accumulating consumer counts per exportKey
+- Implemented `collectExportsForWorkspace()` querying `/clusters/{path}/apis/apis.kcp.io/v1alpha1/apiexports`
+- Implemented `collectTopology()` walking the workspace tree, calling both per-workspace collectors, then emitting aggregated consumer counts
+- Called from 60-second collection loop after `collectWorkspaceMetrics()`
+- All topology metrics reset before each collection cycle to clear stale data
+- Uses 'unknown' as default identity_hash when empty
+- **Learnings for future iterations:**
+  - `apiBindingFullItem` is separate from existing `apiBindingItem` — topology needs spec.reference.export.path/name; per-workspace collection only needs status.phase
+  - Topology collection is sequential (not concurrent) since it accumulates consumer counts in a shared map — concurrent collection would require a mutex on consumerCounts
+  - `exportKey` uses struct comparison for map keys — both Workspace and Name must match
+  - Consumer counts are aggregated across ALL workspaces, then emitted after the walk — this gives accurate cross-workspace consumer counts
+  - Empty phase defaults to "Unknown" for consistency with other binding phase handling
+---
+
+## 2026-02-21 - US-010
+- Added 3 new rows (API Sharing Topology, Workspace Lifecycle, Shard Health) with 12 new panels to kcp-resources.json
+- Files changed: observability/grafana/dashboards/kcp-resources.json (modified)
+- API Sharing Topology row: table with labelsToFields transform for kcp_apibinding_info (Provider, Export, Consumer, Phase columns), stat for total bindings, stat for bound ratio %, stat for unique exports consumed
+- Workspace Lifecycle row: gauge for max phase duration (non-Ready) with green/yellow/red thresholds (0/300s/900s), stat for stuck workspaces with red background highlight
+- Shard Health row: stat for shard ready status with value mapping (1=Healthy, null=Unhealthy), table for kcp_shard_info with labelsToFields, stat for total shards
+- All 9 existing panels unchanged; new panel IDs 100-111
+- **Learnings for future iterations:**
+  - Table panels with Prometheus metrics use `labelsToFields` + `organize` transforms to create clean column views from metric labels
+  - Value mappings (`fieldConfig.defaults.mappings`) can map numeric values (e.g., 1) to descriptive strings (e.g., "Healthy") with colors
+  - Gauge panels need `min`/`max` in fieldConfig.defaults to set the scale range
+  - Bound ratio uses `count(kcp_apibinding_info{phase="Bound"}) / count(kcp_apibinding_info) * 100` with `unit: "percent"`
+  - Unique count uses double aggregation: `count(count by (label1, label2) (metric))`
+---
+
+## 2026-02-21 - US-011
+- Enabled AlertManager in kube-prometheus-stack and created KCP PrometheusRule with 14 alert rules across 5 groups
+- Files changed: observability/prometheus/values.yaml (modified), observability/prometheus/kcp-alerts.yaml (new), setup.sh (modified)
+- AlertManager config: enabled with 24h retention, 50m/64Mi-128Mi resources, null receiver, group_by alertname+severity
+- Group kcp-workspace-lifecycle (3 rules): KCPWorkspaceSchedulingStuck (5m), KCPWorkspaceInitializingStuck (10m), KCPWorkspaceTerminatingStuck (15m)
+- Group kcp-api-health (2 rules): KCPAPIServerErrorRate (5xx >1% for 5m, critical), KCPAPIBindingsUnbound (phase!=Bound for 10m)
+- Group kcp-controller-health (3 rules): KCPControllerQueueBacklog (depth >100 for 10m), KCPControllerHighRetryRate (retries >10/s for 5m), KCPControllerStuck (unfinished_work >300s for 5m, critical)
+- Group kcp-etcd-health (4 rules): KCPEtcdDatabaseSizeLarge (>6GB, critical), KCPEtcdLeaderChangesFrequent (rate >0.5 over 15m), KCPEtcdHighFsyncLatency (p99 >500ms), KCPEtcdHighBackendCommitLatency (p99 >1s)
+- Group kcp-exporter-health (2 rules): KCPExporterScrapeErrors (rate >0.1 for 5m), KCPExporterDown (up==0 for 2m, critical)
+- Added `kubectl apply -f observability/prometheus/kcp-alerts.yaml` to setup.sh after Prometheus Helm install step
+- **Learnings for future iterations:**
+  - PrometheusRule must have label `release: kube-prometheus-stack` for the Prometheus operator to discover and load the rules
+  - AlertManager config in kube-prometheus-stack Helm values goes under `alertmanager.config` (not `alertmanager.alertmanagerSpec.config`)
+  - `ruleSelectorNilUsesHelmValues: false` is already set in prometheus values — this means Prometheus discovers PrometheusRules across all namespaces regardless of labels, but the release label is still best practice
+  - Place `kubectl apply` for PrometheusRule after the Helm install/upgrade block to ensure CRDs exist
+  - Every alert rule needs: expr, for, labels.severity, annotations.summary, annotations.description with actionable runbook steps
+---
+
+## 2026-02-21 - US-012
+- Created KCP audit policy and configured audit logging
+- Files changed: kcp/audit-policy.yaml (new), kcp/values.yaml (modified), setup.sh (modified)
+- Created `audit.k8s.io/v1` Policy with 5 rules: RequestResponse for workspace create/delete, Metadata for apis.kcp.io, Metadata for RBAC, None for noisy resources (events/endpoints/leases get/list/watch), Metadata default
+- Added 5 audit flags to `kcp.extraFlags`: audit-policy-file, audit-log-path, audit-log-format=json, audit-log-maxsize=100, audit-log-maxbackup=3
+- Added volumeMounts and volumes for audit-policy ConfigMap (readonly at /etc/kcp/audit) and audit-logs hostPath (at /var/log/kcp with DirectoryOrCreate)
+- Added ConfigMap creation to setup.sh before KCP Helm install using `--dry-run=client -o yaml | kubectl apply -f -` idempotent pattern
+- **Learnings for future iterations:**
+  - KCP Helm chart v0.14.0 uses `kcp.extraFlags` (list of strings with `--` prefix), not `extraArgs` map
+  - Volume mounts and volumes go under `kcp.volumeMounts` and `kcp.volumes` in the KCP chart values
+  - Audit policy ConfigMap must be created BEFORE KCP Helm install/upgrade — otherwise pods fail to start due to missing volume mount
+  - The `--dry-run=client -o yaml | kubectl apply -f -` pattern makes ConfigMap creation idempotent (safe for re-runs)
+  - Audit log output at `/var/log/kcp/audit.log` is used by OTel Collector filelog receiver in US-013
+---
+
+## 2026-02-21 - US-013
+- Added filelog receiver to OTel Collector for KCP audit event ingestion
+- Files changed: observability/otel-collector/values.yaml (modified)
+- Added filelog receiver configuration: include /var/log/kcp/audit.log, start_at: end
+- Added json_parser operator with gotime timestamp parsing from body.requestReceivedTimestamp
+- Added 7 move operators extracting KCP-specific attributes: workspace_path, logical_cluster, audit_verb, audit_resource, audit_api_group, audit_user, response_code
+- Added severity_parser mapping HTTP response codes to log severity (5xx->error, 4xx->warn, 2xx->info) using min/max range syntax
+- Updated logs pipeline receivers from [otlp] to [otlp, filelog]
+- Added extraVolumes (hostPath /var/log/kcp, DirectoryOrCreate) and extraVolumeMounts (readOnly: true)
+- **Learnings for future iterations:**
+  - OTel filelog receiver json_parser puts parsed fields under `body.*`, not `attributes.*` — use `body.field` in move operators
+  - Nested JSON fields use dot notation: `body.objectRef.resource`, `body.user.username`
+  - Map keys with special chars use bracket notation: `body["annotations"]["kcp.io/path"]`
+  - severity_parser range mapping uses list-of-range-objects format: `- min: 500\n  max: 599` under each severity level
+  - The `otel/opentelemetry-collector-contrib` image (already in use) is required for filelog receiver — the core image doesn't include it
+  - extraVolumes/extraVolumeMounts are top-level Helm chart values (not under config:)
+  - hostPath volume with DirectoryOrCreate type matches the KCP audit volume setup in US-012
+- OTel SDK init pattern: `initOTelMeterProvider(ctx)` returns `(*metric.MeterProvider, error)`; only called when `OTEL_EXPORTER_OTLP_ENDPOINT` env var is set
+- OTel OTLP gRPC exporter uses `grpc.NewClient()` with `insecure.NewCredentials()` for in-cluster communication
+- OTel resource uses `semconv.ServiceName` and `semconv.ServiceVersion` from `go.opentelemetry.io/otel/semconv/v1.26.0`
+- OTel periodic reader with 30-second interval matches the Prometheus scrape interval
+- Graceful OTel shutdown: `mp.Shutdown(ctx)` with 5-second timeout context
+---
+
+## 2026-02-21 - US-014
+- Added OTel SDK dependencies and initialized meter provider in Go exporter
+- Files changed: kcp-exporter/main.go (modified), kcp-exporter/go.mod (modified), kcp-exporter/go.sum (modified)
+- Added dependencies: go.opentelemetry.io/otel, go.opentelemetry.io/otel/sdk, go.opentelemetry.io/otel/sdk/metric, go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc, google.golang.org/grpc
+- Implemented `initOTelMeterProvider(ctx)` returning `(*metric.MeterProvider, error)`:
+  - Reads endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT` env var, defaults to `opentelemetry-collector.observability.svc.cluster.local:4317`
+  - Creates OTLP gRPC exporter with insecure connection
+  - Creates resource with `service.name=kcp-exporter` and `service.version=0.1.0`
+  - Creates periodic reader with 30-second interval
+- In `main()`: only initializes OTel if `OTEL_EXPORTER_OTLP_ENDPOINT` is set; logs warning and continues Prometheus-only on failure
+- Graceful shutdown: `defer mp.Shutdown()` with 5-second timeout context
+- **Learnings for future iterations:**
+  - `go get` must be run from the module directory (kcp-exporter/) not the project root — the first run from the wrong directory appeared to succeed but didn't update go.mod
+  - OTel v1.40.0 upgraded the module's Go version requirement from 1.22 to 1.24.0 — this is acceptable for local dev but note for CI compatibility
+  - `grpc.NewClient()` is the current preferred API (replaces deprecated `grpc.Dial()`) — takes endpoint string and options
+  - `otlpmetricgrpc.WithGRPCConn(conn)` allows sharing a pre-created gRPC connection, useful if traces/logs also need to share it later
+  - The meter provider is created but not yet used by any instruments — US-015 will add async gauges that read from it
+  - semconv v1.26.0 is the latest stable semconv available in OTel v1.40.0 (v1.39.0 is also available)
+---
+
+## 2026-02-21 - US-015
+- Created async gauge instruments and dual-write logic for OTel metric push
+- Files changed: kcp-exporter/main.go (modified), kcp-exporter/go.mod (modified), kcp-exporter/go.sum (modified)
+- Added `exporterState` struct with `sync.RWMutex` protecting int64 fields: workspaceCount, apiExportCount, apiBindingCount, apiResourceSchemaCount, logicalClusterCount
+- Added `otelInstruments` struct holding `Int64Counter` (scrape errors) and `Float64Histogram` (scrape duration)
+- Implemented `registerAsyncGauges(meter, state)` creating 5 `Int64ObservableGauge` instruments with dot-separated names: kcp.workspaces.total, kcp.apiexports.total, kcp.apibindings.total, kcp.apiresourceschemas.total, kcp.logical_clusters.total
+- Each async gauge callback reads from `exporterState` under RLock
+- Implemented `newOTelInstruments(meter)` creating `kcp.exporter.scrape_errors.total` counter and `kcp.exporter.scrape_duration_seconds` histogram
+- Updated `collectMetrics()` signature to accept `*exporterState` and `*otelInstruments`
+- `collectMetrics()` now tracks start time, captures resource counts, dual-writes to both Prometheus gauges and exporterState under Lock, records scrape duration via histogram, and increments OTel error counter alongside Prometheus counter on errors
+- In `main()`: creates `exporterState` and `otelInstruments` (nil when OTel disabled); after meter provider init, creates meter via `mp.Meter("kcp-exporter")`, registers async gauges, creates synchronous instruments
+- OTel instruments only created when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and meter provider init succeeds (feature-flag via env var)
+- Promoted `go.opentelemetry.io/otel/metric` from indirect to direct dependency via `go mod tidy`
+- **Learnings for future iterations:**
+  - OTel async gauges use `Int64ObservableGauge` with `WithInt64Callback` — the callback is invoked by the periodic reader at export time, not at registration time
+  - `mp.Meter("kcp-exporter")` creates a named meter scoped to the exporter — all instruments registered on it will carry this scope
+  - `otelmetric` import alias avoids conflict with `"go.opentelemetry.io/otel/sdk/metric"` which is already imported as `metric`
+  - Dual-write pattern: Prometheus gauges still set as before (no change to scrape behavior); OTel async gauges read from shared state populated by the same collection loop
+  - Nil-safety: `otelInst *otelInstruments` is nil when OTel is disabled; each call site checks `if otelInst != nil` before recording
+  - `state *exporterState` is always created (even without OTel) since it's cheap and simplifies the call signature
+  - US-016 will add OTEL_EXPORTER_OTLP_ENDPOINT to the deployment manifest to enable the OTel push path in-cluster
+---
+
+## 2026-02-21 - US-016
+- Updated deployment manifest for OTLP configuration
+- Files changed: kcp-exporter/manifests/deployment.yaml (modified)
+- Added 3 environment variables to the kcp-exporter container:
+  - `OTEL_EXPORTER_OTLP_ENDPOINT`: `opentelemetry-collector.observability.svc.cluster.local:4317` — enables the OTel push path
+  - `OTEL_SERVICE_NAME`: `kcp-exporter` — identifies the service in OTel telemetry
+  - `OTEL_RESOURCE_ATTRIBUTES`: `service.namespace=kcp,deployment.environment=local` — adds resource attributes
+- Existing Prometheus scrape endpoint (/metrics on port 8080) and ServiceMonitor remain unchanged for backward compatibility
+- Both Prometheus scrape and OTLP push paths will be active simultaneously
+- **Learnings for future iterations:**
+  - The `OTEL_EXPORTER_OTLP_ENDPOINT` env var is the feature flag that gates OTel initialization in the Go exporter (see US-014/US-015)
+  - The prometheusremotewrite exporter in the OTel Collector automatically converts OTel dot-separated metric names to Prometheus underscore format
+  - `OTEL_RESOURCE_ATTRIBUTES` uses comma-separated key=value pairs (no spaces around commas)
+  - Keep Prometheus scrape endpoint active alongside OTLP push for backward compatibility and redundancy
+---

@@ -1,0 +1,323 @@
+{
+  "project": "kcp-otel-local",
+  "branchName": "ralph/kcp-observability-v2",
+  "description": "KCP Observability Expansion - Add recursive workspace metrics, API binding topology, lifecycle monitoring, controller/server dashboards, alerting rules, audit logging via OTel, and OTLP push support",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create KCP Controller Health Grafana dashboard",
+      "description": "As an operator, I want a Grafana dashboard showing KCP controller workqueue health so that I can detect controllers falling behind on reconciliation.",
+      "acceptanceCriteria": [
+        "Create observability/grafana/dashboards/kcp-controller-health.json with Grafana dashboard JSON model",
+        "Dashboard uid is 'kcp-controller-health', title is 'KCP Controller Health', tags are ['kcp', 'controllers']",
+        "Panel 1: Queue Depth by Controller - stacked area, PromQL: workqueue_depth{job=~\".*kcp.*\", name=~\"apibinding|apiexport|workspace|logicalcluster|replication|apiexportendpointslice|workspacetype\"}, thresholds >50 warning, >100 critical",
+        "Panel 2: Processing Rate - lines, PromQL: sum(rate(workqueue_adds_total{job=~\".*kcp.*\", name=~\"apibinding|apiexport|workspace|logicalcluster|replication\"}[5m])) by (name), unit ops/s",
+        "Panel 3: Retry Rate - lines, PromQL: sum(rate(workqueue_retries_total{job=~\".*kcp.*\"}[5m])) by (name), thresholds >5 warning, >10 critical",
+        "Panel 4: Queue Wait Latency p99 - lines, PromQL: histogram_quantile(0.99, sum(rate(workqueue_queue_duration_seconds_bucket{job=~\".*kcp.*\"}[5m])) by (le, name))",
+        "Panel 5: Work Duration p99 - lines, PromQL: histogram_quantile(0.99, sum(rate(workqueue_work_duration_seconds_bucket{job=~\".*kcp.*\"}[5m])) by (le, name)), thresholds >10s warning, >30s critical",
+        "Panel 6: Unfinished Work Duration - lines, PromQL: workqueue_unfinished_work_seconds{job=~\".*kcp.*\"}, thresholds >120s warning, >300s critical",
+        "Panel 7: Longest Running Processor - lines, PromQL: workqueue_longest_running_processor_seconds{job=~\".*kcp.*\"}",
+        "All panels use datasource {\"type\": \"prometheus\", \"uid\": \"prometheus\"} and legend {{name}}",
+        "Panels organized in 4 rows: Queue Health Overview, Error Indicators, Detailed Timing, Longest Running",
+        "Add a ConfigMap in setup.sh named grafana-dashboard-kcp-controller-health in namespace observability with label grafana_dashboard: '1', containing the dashboard JSON",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Dashboard-only task, no Go code changes. Uses existing workqueue_* metrics already scraped from KCP pods. See todos/01-controller-workqueue-dashboard.md for full panel specs."
+    },
+    {
+      "id": "US-002",
+      "title": "Add KCP API Group breakdown panels to Server Health dashboard",
+      "description": "As an operator, I want API server metrics broken down by KCP API groups so that I can identify which API group is generating the most traffic or errors.",
+      "acceptanceCriteria": [
+        "Modify observability/grafana/dashboards/kcp-server-health.json to add 2 new rows after the existing panels",
+        "All 7 existing panels remain unchanged with their original panel IDs",
+        "New panel IDs start from 100 to avoid conflicts",
+        "New Row 'KCP API Groups' with 4 panels (each width 12): Request Rate by Group (stacked area), Request Rate by Resource Top 10 (lines), Watch Event Rate (lines), Error Rate by Group (lines with thresholds >1 warning, >10 critical)",
+        "New Row 'KCP Operation Latency' with 4 panels (each width 12): Workspace CRUD Latency p50/p95/p99 by verb, APIBinding Creation Latency p50/p95/p99, LIST Request Latency by Resource p99, WATCH Connection Count by Resource",
+        "All new panels filter on KCP API groups: group=~\"tenancy.kcp.io|apis.kcp.io|core.kcp.io|topology.kcp.io|cache.kcp.io\"",
+        "All new panels use datasource {\"type\": \"prometheus\", \"uid\": \"prometheus\"}",
+        "Each new row is a type 'row' panel with collapsed: false",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Dashboard edit only. Adds 8 new panels to existing dashboard. See todos/03-kcp-api-group-breakdown.md for exact PromQL queries per panel."
+    },
+    {
+      "id": "US-003",
+      "title": "Add shard metrics collection to Go exporter",
+      "description": "As an operator, I want to monitor KCP shard health so that I can detect when a shard goes not-Ready and an entire segment of workspaces becomes unreachable.",
+      "acceptanceCriteria": [
+        "Add shardItem struct to kcp-exporter/main.go parsing metadata.name, spec.baseURL, and status.conditions",
+        "Add condition struct with Type, Status, LastTransitionTime, Reason, Message fields (reused by later stories)",
+        "Register kcp_shards_total gauge, kcp_shard_info gauge vec (labels: name, url, ready), kcp_shard_condition gauge vec (labels: name, type, status)",
+        "Implement collectShards() function querying /clusters/root/apis/core.kcp.io/v1alpha1/shards",
+        "collectShards resets shard_info and shard_condition gauges before setting new values to handle shard removal",
+        "For each shard, set shard_info with ready='true' if Ready condition is True, otherwise ready='false'",
+        "For each shard condition, set shard_condition with value 1",
+        "Call collectShards() from the existing collectMetrics() function",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Follows the existing doRequest() + JSON parse + gauge set pattern. See todos/05-additional-kcp-resources.md and todos/08-shard-health-monitoring.md for full type definitions."
+    },
+    {
+      "id": "US-004",
+      "title": "Add workspace type metrics collection to Go exporter",
+      "description": "As an operator, I want to see what workspace types are defined in KCP so that I can detect unexpected changes to the workspace taxonomy.",
+      "acceptanceCriteria": [
+        "Add workspaceTypeItem struct parsing metadata.name, spec.defaultChildWorkspaceType, spec.initializer (bool), spec.terminator (bool)",
+        "Register kcp_workspace_types_total gauge and kcp_workspace_type_info gauge vec (labels: name, has_initializer, has_terminator)",
+        "Implement collectWorkspaceTypes() querying /clusters/root/apis/tenancy.kcp.io/v1alpha1/workspacetypes",
+        "Reset workspaceTypeInfo gauge before setting new values",
+        "Format initializer/terminator booleans as 'true'/'false' strings for label values",
+        "Call collectWorkspaceTypes() from collectMetrics()",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Same pattern as collectShards. See todos/05-additional-kcp-resources.md for type definitions and expected metric values."
+    },
+    {
+      "id": "US-005",
+      "title": "Add APIExportEndpointSlice metrics collection to Go exporter",
+      "description": "As an operator, I want to monitor APIExport endpoint slices so that I can detect when a virtual workspace serving an APIExport is down (zero endpoints).",
+      "acceptanceCriteria": [
+        "Add endpointSliceItem struct parsing metadata.name, spec.export.name, spec.export.path, status.endpoints[].url",
+        "Register kcp_apiexport_endpoint_slices_total gauge and kcp_apiexport_endpoints_total gauge vec (labels: export, workspace)",
+        "Implement collectEndpointSlices() querying /clusters/root/apis/apis.kcp.io/v1alpha1/apiexportendpointslices",
+        "Reset apiExportEndpointsTotal gauge before setting new values",
+        "Set kcp_apiexport_endpoints_total to len(status.endpoints) for each slice - value 0 means virtual workspace is down",
+        "Call collectEndpointSlices() from collectMetrics()",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Same pattern as collectShards and collectWorkspaceTypes. See todos/05-additional-kcp-resources.md for full spec."
+    },
+    {
+      "id": "US-006",
+      "title": "Add workspace lifecycle duration and stuck detection metrics",
+      "description": "As an operator, I want to know how long workspaces have been in their current phase so that I can detect workspaces stuck in Scheduling, Initializing, or Terminating.",
+      "acceptanceCriteria": [
+        "Add workspaceLifecycleItem struct with metadata.name, metadata.creationTimestamp, status.phase, status.conditions[] (reuse condition type from US-003)",
+        "Register kcp_workspace_phase_duration_seconds gauge vec (labels: path, phase) and kcp_workspace_stuck_count gauge vec (labels: phase)",
+        "Implement calculatePhaseDuration() that returns seconds: for Ready phase use lastTransitionTime of Ready condition, for non-Ready use creationTimestamp as fallback",
+        "Define stuckThresholds map: Scheduling=5min, Initializing=10min, Terminating=15min",
+        "Reset both gauges before each collection cycle to clear stale data from deleted workspaces",
+        "Accumulate stuck counts per phase based on threshold comparison and set stuck count gauges",
+        "Integrate into existing workspace collection in collectMetrics() - reuses the existing workspace list API response, no additional HTTP request needed",
+        "Clamp negative durations to 0 to handle clock skew",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Reuses existing workspace API call. Parse creationTimestamp and condition lastTransitionTime as time.RFC3339. See todos/07-workspace-lifecycle-metrics.md."
+    },
+    {
+      "id": "US-007",
+      "title": "Add recursive workspace discovery types and function",
+      "description": "As a developer, I need the workspace tree discovery mechanism so that per-workspace metrics can be collected for all child workspaces, not just root.",
+      "acceptanceCriteria": [
+        "Add WorkspaceNode struct with Name, Path, Type, Phase string fields and Children []*WorkspaceNode",
+        "Add workspaceFullItem struct parsing metadata.name, spec.type.name, status.phase",
+        "Implement discoverWorkspaces(ctx, client, cfg, parentPath) returning ([]*WorkspaceNode, error)",
+        "discoverWorkspaces queries /clusters/{parentPath}/apis/tenancy.kcp.io/v1alpha1/workspaces",
+        "Build child path as parentPath + ':' + ws.Metadata.Name",
+        "Only recurse into workspaces with status.phase == 'Ready'",
+        "If recursion into a child fails, log warning and skip that subtree - do not fail the whole tree",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "This is the foundation for US-008 and US-009. See todos/04-recursive-workspace-metrics.md for complete function signatures and recursive pattern."
+    },
+    {
+      "id": "US-008",
+      "title": "Add per-workspace collection with concurrency and main integration",
+      "description": "As an operator, I want per-workspace resource counts collected for all workspaces in the tree so that org-alpha, org-beta, org-gamma resources are visible in metrics.",
+      "acceptanceCriteria": [
+        "Register kcp_workspace_info gauge vec (labels: path, name, type, phase), kcp_workspace_apiexports_total (labels: workspace_path), kcp_workspace_apibindings_total (labels: workspace_path, phase), kcp_workspace_apiresourceschemas_total (labels: workspace_path), kcp_workspace_tree_depth gauge, kcp_workspace_children_total gauge vec (labels: path)",
+        "Implement collectWorkspaceMetrics(ctx, client, cfg, tree, sem) that walks the tree and queries each Ready workspace for apiexports, apibindings, apiresourceschemas",
+        "Use semaphore channel with capacity 10 (make(chan struct{}, 10)) to limit concurrent API queries",
+        "Use sync.WaitGroup for goroutine coordination",
+        "Add discovery goroutine to main() with 5-minute ticker, protected by sync.RWMutex on workspaceTree variable",
+        "Run discovery once immediately on startup before first ticker",
+        "Add collection ticker at 60-second interval that reads workspace tree under RLock",
+        "Reset all per-workspace GaugeVecs before each collection cycle to clear stale entries from deleted workspaces",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Depends on US-007 for discoverWorkspaces() function and WorkspaceNode type. See todos/04-recursive-workspace-metrics.md for goroutine integration pattern and collectForWorkspace details."
+    },
+    {
+      "id": "US-009",
+      "title": "Add APIBinding topology metrics and collection",
+      "description": "As an operator, I want to see provider-consumer relationships from APIBindings so that I can understand which workspaces consume APIs from which providers.",
+      "acceptanceCriteria": [
+        "Add apiBindingFullItem struct parsing metadata.name, spec.reference.export.path, spec.reference.export.name, status.phase, status.boundResources, status.conditions",
+        "Add apiExportFullItem struct parsing metadata.name, spec.latestResourceSchemas, status.identityHash, status.conditions",
+        "Add exportKey struct with Workspace and Name string fields",
+        "Register kcp_apibinding_info gauge vec (labels: consumer_workspace, provider_workspace, export_name, phase)",
+        "Register kcp_apiexport_consumers_total gauge vec (labels: provider_workspace, export_name)",
+        "Register kcp_apiexport_info gauge vec (labels: workspace, name, identity_hash, schema_count)",
+        "Implement collectTopology(ctx, client, cfg, tree) that walks the workspace tree collecting bindings and exports",
+        "Implement collectBindingsForWorkspace() querying /clusters/{path}/apis/apis.kcp.io/v1alpha1/apibindings, accumulating consumer counts per exportKey",
+        "Implement collectExportsForWorkspace() querying /clusters/{path}/apis/apis.kcp.io/v1alpha1/apiexports",
+        "Call collectTopology() from the 60-second collection loop after collectWorkspaceMetrics()",
+        "Reset all topology metrics before each collection cycle",
+        "Use 'unknown' as default identity_hash when empty",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Depends on US-008 for workspace tree. See todos/06-apibinding-topology.md for full type definitions, collection logic, and demo scenario."
+    },
+    {
+      "id": "US-010",
+      "title": "Add topology, lifecycle, and shard panels to KCP Resources dashboard",
+      "description": "As an operator, I want Grafana dashboard panels showing API sharing topology, workspace lifecycle durations, and shard health alongside existing resource count panels.",
+      "acceptanceCriteria": [
+        "Modify observability/grafana/dashboards/kcp-resources.json to add 3 new rows",
+        "Add 'API Sharing Topology' row with: table panel showing kcp_apibinding_info (columns: Provider, Export, Consumer, Phase via labelsToFields transform), stat panel for count(kcp_apibinding_info), stat panel for bound ratio percentage, stat panel for unique exports consumed",
+        "Add 'Workspace Lifecycle' row with: gauge panel showing max by (phase) (kcp_workspace_phase_duration_seconds{phase!='Ready'}) with green/yellow/red thresholds, stat panel for kcp_workspace_stuck_count > 0 with red highlight",
+        "Add 'Shard Health' row with: stat panel for kcp_shard_condition{type='Ready', status='True'} mapped to Healthy/Unhealthy, table panel for kcp_shard_info, stat panel for kcp_shards_total",
+        "All existing panels remain unchanged",
+        "New panels use datasource {\"type\": \"prometheus\", \"uid\": \"prometheus\"}",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Depends on US-003 (shard metrics), US-006 (lifecycle metrics), US-009 (topology metrics) existing in the exporter. See todos/06-apibinding-topology.md, todos/07-workspace-lifecycle-metrics.md, todos/08-shard-health-monitoring.md for panel specs."
+    },
+    {
+      "id": "US-011",
+      "title": "Enable AlertManager and create KCP PrometheusRule",
+      "description": "As an operator, I want automated alerts for KCP failure domains so that I am notified when workspaces get stuck, API error rates spike, controllers back up, etcd approaches limits, or the exporter fails.",
+      "acceptanceCriteria": [
+        "Modify observability/prometheus/values.yaml to enable alertmanager with resources (50m CPU, 64Mi-128Mi memory), 24h retention, null receiver, group_by alertname+severity",
+        "Create observability/prometheus/kcp-alerts.yaml as a PrometheusRule with label release: kube-prometheus-stack",
+        "Group kcp-workspace-lifecycle: 3 rules - KCPWorkspaceSchedulingStuck (>0 for 5m), KCPWorkspaceInitializingStuck (>0 for 10m), KCPWorkspaceTerminatingStuck (>0 for 15m)",
+        "Group kcp-api-health: 2 rules - KCPAPIServerErrorRate (5xx rate >1% for 5m, critical), KCPAPIBindingsUnbound (phase!=Bound >0 for 10m)",
+        "Group kcp-controller-health: 3 rules - KCPControllerQueueBacklog (depth >100 for 10m), KCPControllerHighRetryRate (retries >10/s for 5m), KCPControllerStuck (unfinished_work >300s for 5m, critical)",
+        "Group kcp-etcd-health: 4 rules - KCPEtcdDatabaseSizeLarge (>6GB, critical), KCPEtcdLeaderChangesFrequent (rate >0.5 over 15m), KCPEtcdHighFsyncLatency (p99 >500ms), KCPEtcdHighBackendCommitLatency (p99 >1s)",
+        "Group kcp-exporter-health: 2 rules - KCPExporterScrapeErrors (rate >0.1 for 5m), KCPExporterDown (up==0 for 2m, critical)",
+        "Every alert has severity label (warning or critical), summary annotation, and description annotation with runbook steps",
+        "Add 'kubectl apply -f observability/prometheus/kcp-alerts.yaml' to setup.sh after the Prometheus Helm install step",
+        "Total: 14 alert rules across 5 groups",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "YAML config only. The release: kube-prometheus-stack label is critical for Prometheus operator to pick up the rules. See todos/02-kcp-alerting-rules.md for full alert specifications and runbooks."
+    },
+    {
+      "id": "US-012",
+      "title": "Create KCP audit policy and configure audit logging",
+      "description": "As a platform admin, I want KCP audit events captured in a structured JSON log so that tenant lifecycle, API sharing, and security events have an audit trail.",
+      "acceptanceCriteria": [
+        "Create kcp/audit-policy.yaml with audit.k8s.io/v1 Policy: RequestResponse level for tenancy.kcp.io workspaces create/delete, Metadata level for apis.kcp.io resources, Metadata level for rbac resources, None level for events/endpoints/leases get/list/watch, Metadata default for everything else",
+        "Add audit flags to kcp/values.yaml under kcp extraFlags or extraArgs: --audit-policy-file=/etc/kcp/audit/audit-policy.yaml, --audit-log-path=/var/log/kcp/audit.log, --audit-log-format=json, --audit-log-maxsize=100, --audit-log-maxbackup=3",
+        "Add volume and volumeMount in kcp/values.yaml for audit-policy ConfigMap (readonly at /etc/kcp/audit) and audit-logs hostPath (at /var/log/kcp)",
+        "Add ConfigMap creation to setup.sh: kubectl create configmap kcp-audit-policy --from-file=audit-policy.yaml=kcp/audit-policy.yaml -n kcp --dry-run=client -o yaml | kubectl apply -f -",
+        "ConfigMap creation step runs before KCP Helm install so the ConfigMap exists when KCP pods start",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Config/YAML only. The KCP Helm chart v0.14.0 may use kcp.extraArgs or kcp.extraFlags - check chart values. See todos/09-kcp-audit-via-otel.md for audit policy and volume mount details."
+    },
+    {
+      "id": "US-013",
+      "title": "Add filelog receiver to OTel Collector for KCP audit events",
+      "description": "As a platform admin, I want KCP audit events ingested by the OTel Collector so that they flow through the observability pipeline with structured workspace attributes.",
+      "acceptanceCriteria": [
+        "Add filelog receiver to observability/otel-collector/values.yaml config.receivers section: include /var/log/kcp/audit.log, start_at: end",
+        "Add json_parser operator with timestamp parse from requestReceivedTimestamp",
+        "Add move operators to extract: annotations.kcp.io/path -> workspace_path, annotations.tenancy.kcp.io/workspace -> logical_cluster, verb -> audit_verb, objectRef.resource -> audit_resource, objectRef.apiGroup -> audit_api_group, user.username -> audit_user, responseStatus.code -> response_code",
+        "Add severity_parser mapping response codes: 5xx -> error, 4xx -> warn, 2xx -> info",
+        "Update logs pipeline receivers to include filelog alongside otlp: [otlp, filelog]",
+        "Add extraVolumes hostPath /var/log/kcp (type DirectoryOrCreate) and extraVolumeMounts at /var/log/kcp (readOnly: true) to collector values",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "OTel Collector config only. Depends on US-012 having enabled KCP audit logging to /var/log/kcp/audit.log. See todos/09-kcp-audit-via-otel.md for operator chain and severity mapping."
+    },
+    {
+      "id": "US-014",
+      "title": "Add OTel SDK dependencies and initialize meter provider",
+      "description": "As a developer, I want the Go exporter to initialize an OTel meter provider so that metrics can be pushed via OTLP to the OTel Collector.",
+      "acceptanceCriteria": [
+        "Add OTel SDK dependencies to kcp-exporter: go.opentelemetry.io/otel, go.opentelemetry.io/otel/sdk, go.opentelemetry.io/otel/sdk/metric, go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc, go.opentelemetry.io/otel/metric, google.golang.org/grpc",
+        "Run go mod tidy to update go.mod and go.sum",
+        "Implement initOTelMeterProvider(ctx) returning (*sdkmetric.MeterProvider, error)",
+        "Read OTLP endpoint from OTEL_EXPORTER_OTLP_ENDPOINT env var, default to opentelemetry-collector.observability.svc.cluster.local:4317",
+        "Create OTLP gRPC exporter with insecure connection",
+        "Create resource with service.name=kcp-exporter and service.version=0.1.0",
+        "Create periodic reader with 30-second interval",
+        "In main(), only initialize OTel if OTEL_EXPORTER_OTLP_ENDPOINT is set, log warning and continue with Prometheus-only if init fails",
+        "Add graceful shutdown: defer mp.Shutdown() with 5-second timeout context",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "First part of OTLP refactor. The meter provider is not used by any instruments yet - that comes in US-015. See todos/10-otlp-push-refactor.md for import paths and initialization code."
+    },
+    {
+      "id": "US-015",
+      "title": "Create async gauge instruments and dual-write logic",
+      "description": "As a developer, I want OTel async gauge instruments that report the same values as the Prometheus gauges so that metrics flow through both paths simultaneously.",
+      "acceptanceCriteria": [
+        "Add exporterState struct with sync.RWMutex protecting int64 fields: workspaceCount, apiExportCount, apiBindingCount, apiResourceSchemaCount, logicalClusterCount",
+        "Implement registerAsyncGauges(meter, state) that creates Int64ObservableGauge for each metric with callback reading from state under RLock",
+        "OTel metric names use dots: kcp.workspaces.total, kcp.apiexports.total, kcp.apibindings.total, kcp.apiresourceschemas.total, kcp.logical_clusters.total",
+        "Add Int64Counter for kcp.exporter.scrape_errors.total and Float64Histogram for kcp.exporter.scrape_duration_seconds",
+        "Update collectMetrics() to store current values in exporterState under Lock (dual-write: Prometheus gauges still set as before)",
+        "Record scrape duration histogram and increment scrape error counter via OTel instruments when errors occur",
+        "Only create OTel instruments if meter provider was successfully initialized (feature-flag via env var)",
+        "go build ./... passes in kcp-exporter directory",
+        "go vet ./... passes in kcp-exporter directory",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "Depends on US-014 for meter provider. Async gauges match Prometheus gauge semantics exactly - no delta tracking needed. See todos/10-otlp-push-refactor.md for registerAsyncGauges pattern."
+    },
+    {
+      "id": "US-016",
+      "title": "Update deployment manifest for OTLP configuration",
+      "description": "As a developer, I want the exporter deployment to include OTLP environment variables so that the OTel push path is enabled in-cluster.",
+      "acceptanceCriteria": [
+        "Add OTEL_EXPORTER_OTLP_ENDPOINT env var to kcp-exporter/manifests/deployment.yaml with value opentelemetry-collector.observability.svc.cluster.local:4317",
+        "Add OTEL_SERVICE_NAME env var with value kcp-exporter",
+        "Add OTEL_RESOURCE_ATTRIBUTES env var with value service.namespace=kcp,deployment.environment=local",
+        "Existing Prometheus scrape endpoint (/metrics on port 8080) and ServiceMonitor remain unchanged for backward compatibility",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": true,
+      "notes": "Small config change. Both Prometheus scrape and OTLP push paths will be active. The prometheusremotewrite exporter in the OTel Collector converts OTel dot-separated names to Prometheus underscore format automatically. See todos/10-otlp-push-refactor.md for deployment YAML."
+    }
+  ]
+}

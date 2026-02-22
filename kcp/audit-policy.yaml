@@ -1,0 +1,33 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Log full request/response for workspace create/delete (tenant lifecycle)
+  - level: RequestResponse
+    resources:
+      - group: "tenancy.kcp.io"
+        resources: ["workspaces"]
+    verbs: ["create", "delete"]
+
+  # Log metadata for all apis.kcp.io resources (API sharing events)
+  - level: Metadata
+    resources:
+      - group: "apis.kcp.io"
+        resources: ["*"]
+
+  # Log metadata for RBAC resources (security events)
+  - level: Metadata
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["*"]
+
+  # Skip noisy read-only resources
+  - level: None
+    resources:
+      - group: ""
+        resources: ["events", "endpoints"]
+      - group: "coordination.k8s.io"
+        resources: ["leases"]
+    verbs: ["get", "list", "watch"]
+
+  # Default: log metadata for everything else
+  - level: Metadata

@@ -1,0 +1,12 @@
+# Generated kubeconfigs (contain certs)
+kcp-admin.kubeconfig
+kcp-exporter.kubeconfig
+
+# Go binaries
+kcp-exporter/kcp-exporter
+
+# Claude worktrees
+.claude/worktrees/
+
+# macOS
+*.DS_Store

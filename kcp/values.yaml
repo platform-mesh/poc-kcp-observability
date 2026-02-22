@@ -13,10 +13,33 @@ kcp:
       memory: 512Mi
     limits:
       memory: 1Gi
-  extraFlags: []
+  extraFlags:
+    - "--audit-policy-file=/etc/kcp/audit/audit-policy.yaml"
+    - "--audit-log-path=/var/log/kcp/audit.log"
+    - "--audit-log-format=json"
+    - "--audit-log-maxsize=100"
+    - "--audit-log-maxbackup=3"
+  extraVolumes:
+    - name: audit-policy
+      configMap:
+        name: kcp-audit-policy
+    - name: audit-logs
+      hostPath:
+        path: /var/log/kcp
+        type: DirectoryOrCreate
+  extraVolumeMounts:
+    - name: audit-policy
+      mountPath: /etc/kcp/audit
+      readOnly: true
+    - name: audit-logs
+      mountPath: /var/log/kcp
   monitoring:
     serviceMonitor:
       enabled: true
+
+# Disable built-in audit (creates PVC, not shareable with OTel Collector)
+audit:
+  enabled: false
 
 kcpFrontProxy:
   replicas: 1
